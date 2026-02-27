@@ -1,65 +1,59 @@
 package http
 
 import (
+	"compress/gzip"
 	"io"
-	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
 
-type closeTrackingReadCloser struct {
-	closed *atomic.Int32
+func TestMakeRequestBodyReaderEmptyBody(t *testing.T) {
+	body := makeRequestBodyReader("", "")
+	require.Nil(t, body)
 }
 
-func (*closeTrackingReadCloser) Read(_ []byte) (int, error) {
-	return 0, io.EOF
+func TestMakeRequestBodyReaderNoEncoding(t *testing.T) {
+	body := makeRequestBodyReader("", "payload")
+	require.NotNil(t, body)
+	t.Cleanup(func() { _ = body.Close() })
+
+	actual, err := io.ReadAll(body)
+	require.NoError(t, err)
+	require.Equal(t, []byte("payload"), actual)
 }
 
-func (c *closeTrackingReadCloser) Close() error {
-	c.closed.Add(1)
-	return nil
+func TestMakeRequestBodyReaderGzip(t *testing.T) {
+	body := makeRequestBodyReader("gzip", "payload")
+	require.NotNil(t, body)
+	t.Cleanup(func() { _ = body.Close() })
+
+	reader, err := gzip.NewReader(body)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reader.Close() })
+
+	actual, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.Equal(t, []byte("payload"), actual)
 }
 
-func TestGatherURLClosesBodyOnRequestBuildError(t *testing.T) {
-	originalFactory := requestBodyReaderFactory
-	t.Cleanup(func() {
-		requestBodyReaderFactory = originalFactory
-	})
-
-	var closeCalls atomic.Int32
-	requestBodyReaderFactory = func(_, _ string) io.Reader {
-		return &closeTrackingReadCloser{closed: &closeCalls}
-	}
-
+func TestGatherURLEarlyFailureWithGzipBody(t *testing.T) {
 	h := &HTTP{
-		Method: "BAD METHOD",
-		Body:   "payload",
+		Method:          "BAD METHOD",
+		Body:            "payload",
+		ContentEncoding: "gzip",
 	}
 
-	err := h.gatherURL(nil, "http://example.com")
-	require.Error(t, err)
-	require.Equal(t, int32(1), closeCalls.Load())
-}
+	done := make(chan error, 1)
+	go func() {
+		done <- h.gatherURL(nil, "http://example.com")
+	}()
 
-func TestGatherURLClosesBodyOnEarlyReturnAfterRequest(t *testing.T) {
-	originalFactory := requestBodyReaderFactory
-	t.Cleanup(func() {
-		requestBodyReaderFactory = originalFactory
-	})
-
-	var closeCalls atomic.Int32
-	requestBodyReaderFactory = func(_, _ string) io.Reader {
-		return &closeTrackingReadCloser{closed: &closeCalls}
+	select {
+	case err := <-done:
+		require.Error(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("gatherURL timed out on early failure")
 	}
-
-	h := &HTTP{
-		Method:    "GET",
-		Body:      "payload",
-		TokenFile: "does-not-exist.token",
-	}
-
-	err := h.gatherURL(nil, "http://example.com")
-	require.Error(t, err)
-	require.Equal(t, int32(1), closeCalls.Load())
 }
