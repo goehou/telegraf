@@ -24,6 +24,7 @@ import (
 var sampleConfig string
 
 var once sync.Once
+var requestBodyReaderFactory = makeRequestBodyReader
 
 type HTTP struct {
 	URLs            []string `toml:"urls"`
@@ -115,10 +116,16 @@ func (h *HTTP) Stop() {
 //
 //	error: Any error that may have occurred
 func (h *HTTP) gatherURL(acc telegraf.Accumulator, url string) error {
-	body := makeRequestBodyReader(h.ContentEncoding, h.Body)
+	body := requestBodyReaderFactory(h.ContentEncoding, h.Body)
 	request, err := http.NewRequest(h.Method, url, body)
 	if err != nil {
+		if c, ok := body.(io.Closer); ok {
+			_ = c.Close()
+		}
 		return err
+	}
+	if request.Body != nil {
+		defer request.Body.Close()
 	}
 
 	if !h.Token.Empty() {
